@@ -43,18 +43,95 @@
 #include "SharedDefines.h"
 #include "World.h"
 #include "WorldSession.h"
+#include <iterator>
+#include <string>
+#include <vector>
 
 constexpr auto YESSKIPDK = 1;
 
-void Azerothcore_skip_deathknight_HandleSkip(Player* player)
+// Tofu Worldview: the skip completes every obtainable Ebon Hold quest and lets
+// the player pick the cloak (quest 12679) and the two-hander (quest 12801)
+// instead of handing out every choice.
+namespace TofuSkipDK
+{
+    constexpr uint32 QUEST_CLOAK_CHOICE = 12679;  // Tonight We Dine In Havenshire
+    constexpr uint32 QUEST_WEAPON_CHOICE = 12801; // The Light of Dawn
+
+    // Gossip actions above the module's YESSKIPDK (1). The first click stays
+    // action 1 so other modules that watch it (Tofu challenge modes) still see it.
+    constexpr uint32 ACTION_CLOAK_BASE = GOSSIP_ACTION_INFO_DEF + 100; // + cloak index
+    constexpr uint32 ACTION_SKIP_BASE = GOSSIP_ACTION_INFO_DEF + 200;  // + cloak index * 10 + weapon index
+
+    // Every obtainable quest of the Death Knight starting zone, in chain order.
+    // The race quest "A Special Surprise" and the faction quest at the end are
+    // added per player. 12625 and 12626 are left out: no creature or object
+    // starts or ends them.
+    constexpr uint32 STARTER_QUESTS[] =
+    {
+        12593, 12619, 12842, 12848, 12636, 12641, 12657, 12849, 12850, 12670,
+        12678, 12679, 12680, 12687, 12733, 12711, 12697, 12698, 12700, 12701,
+        12706, 12714, 12715, 12716, 12717, 12718, 12719, 12720, 12722, 12723,
+        12724, 12725, 12727, 12738
+    };
+
+    constexpr uint32 FINAL_QUESTS[] =
+    {
+        12751, 12754, 12755, 12756, 12757, 12778, 12779, 12800, 12801, 13165,
+        13166
+    };
+
+    // Returns the choice index to use: the requested one if that slot holds an
+    // item, otherwise 0 (the first choice).
+    uint32 ValidChoice(Quest const* quest, uint32 choice)
+    {
+        if (choice < QUEST_REWARD_CHOICES_COUNT && quest->RewardChoiceItemId[choice])
+            return choice;
+        return 0;
+    }
+
+    // Choice indexes of a quest that hold an item.
+    std::vector<uint32> ChoiceIndexes(uint32 questId)
+    {
+        std::vector<uint32> indexes;
+        if (Quest const* quest = sObjectMgr->GetQuestTemplate(questId))
+            for (uint32 i = 0; i < QUEST_REWARD_CHOICES_COUNT; ++i)
+                if (quest->RewardChoiceItemId[i])
+                    indexes.push_back(i);
+        return indexes;
+    }
+
+    uint32 ChoiceItem(uint32 questId, uint32 index)
+    {
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        if (!quest || index >= QUEST_REWARD_CHOICES_COUNT)
+            return 0;
+        return quest->RewardChoiceItemId[index];
+    }
+
+    std::string ItemName(uint32 itemId)
+    {
+        if (ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId))
+            return proto->Name1;
+        return "item " + std::to_string(itemId);
+    }
+
+    // Chat link the player can hover to see the item's tooltip.
+    std::string ItemLink(uint32 itemId)
+    {
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
+        if (!proto)
+            return ItemName(itemId);
+        uint32 quality = proto->Quality < MAX_ITEM_QUALITY ? proto->Quality : 0;
+        return Acore::StringFormat("|c{:08x}|Hitem:{}:0:0:0:0:0:0:0:0|h[{}]|h|r", ItemQualityColors[quality], itemId, proto->Name1);
+    }
+}
+
+void Azerothcore_skip_deathknight_HandleSkip(Player* player, uint32 cloakChoice = 0, uint32 weaponChoice = 0)
 {
     //Not sure where DKs were supposed to pick this up from, leaving as the one manual add
     player->AddItem(6948, true); //Hearthstone
 
-    // these are all the starter quests that award talent points, quest items, or spells
-    int STARTER_QUESTS[33] = { 12593, 12619, 12842, 12848, 12636, 12641, 12657, 12678, 12679, 12680, 12687, 12698, 12701, 12706, 12716, 12719, 12720, 12722, 12724, 12725, 12727, 12733, -1, 12751, 12754, 12755, 12756, 12757, 12779, 12801, 13165, 13166 };
-
-    int specialSurpriseQuestId = -1;
+    uint32 specialSurpriseQuestId = 0;
     switch (player->getRace())
     {
     case RACE_TAUREN:
@@ -89,13 +166,17 @@ void Azerothcore_skip_deathknight_HandleSkip(Player* player)
         break;
     }
 
-    STARTER_QUESTS[22] = specialSurpriseQuestId;
-    STARTER_QUESTS[32] = player->GetTeamId() == TEAM_ALLIANCE ? 13188 : 13189;
+    std::vector<uint32> quests(std::begin(TofuSkipDK::STARTER_QUESTS), std::end(TofuSkipDK::STARTER_QUESTS));
+    if (specialSurpriseQuestId)
+        quests.push_back(specialSurpriseQuestId);
+    else
+        LOG_ERROR("module", "Skip DK: no A Special Surprise quest for player {} (race {})", player->GetName(), player->getRace());
+    quests.insert(quests.end(), std::begin(TofuSkipDK::FINAL_QUESTS), std::end(TofuSkipDK::FINAL_QUESTS));
+    quests.push_back(player->GetTeamId() == TEAM_ALLIANCE ? 13188 : 13189);
 
-    for (int questId : STARTER_QUESTS)
+    for (uint32 questId : quests)
     {
-        // A race without a case above leaves -1, and a quest can be missing
-        // from the world database. Both give a null template.
+        // A quest can be missing from the world database.
         Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
         if (!quest)
         {
@@ -104,19 +185,23 @@ void Azerothcore_skip_deathknight_HandleSkip(Player* player)
             continue;
         }
 
+        // Already turned in: nothing to do.
+        if (player->IsQuestRewarded(questId))
+            continue;
+
+        uint32 choice = 0;
+        if (questId == TofuSkipDK::QUEST_CLOAK_CHOICE)
+            choice = TofuSkipDK::ValidChoice(quest, cloakChoice);
+        else if (questId == TofuSkipDK::QUEST_WEAPON_CHOICE)
+            choice = TofuSkipDK::ValidChoice(quest, weaponChoice);
+
+        // A quest already in the log is turned in as it is; any other quest is
+        // taken first. Either way it counts as completed (quest log history,
+        // quest-count achievements).
         if (player->GetQuestStatus(questId) == QUEST_STATUS_NONE)
-        {
             player->AddQuest(quest, nullptr);
-            player->RewardQuest(quest, 0, player, false);
-        }
+        player->RewardQuest(quest, choice, player, false);
     }
-
-    //these are alternate reward items from quest 12679, item 39320 is chosen by default as the reward
-    player->AddItem(38664, true);//Sky Darkener's Shroud of the Unholy
-    player->AddItem(39322, true);//Shroud of the North Wind
-
-    //these are alternate reward items from quest 12801, item 38633 is chosen by default as the reward
-    player->AddItem(38632, true);//Greatsword of the Ebon Blade
 
     int DKL = sConfigMgr->GetOption<float>("Skip.Deathknight.Start.Level", 58);
     if (player->GetLevel() <= DKL)
@@ -248,23 +333,94 @@ public:
                 case LOCALE_enUS: localizedEntry = LOCALE_LICHKING_0; break;
                 default: localizedEntry = LOCALE_LICHKING_0;
                 }
-                AddGossipItemFor(player, GOSSIP_ICON_INTERACT_1, localizedEntry, GOSSIP_SENDER_MAIN, YESSKIPDK, "Are you sure you want to skip the starting zone?", 0, false);
+                // Tofu: no confirmation here; the cloak and weapon menus follow,
+                // and the weapon pick carries the confirmation.
+                AddGossipItemFor(player, GOSSIP_ICON_INTERACT_1, localizedEntry, GOSSIP_SENDER_MAIN, YESSKIPDK);
             }
             player->TalkedToCreature(creature->GetEntry(), creature->GetGUID());
             SendGossipMenuFor(player, player->GetGossipTextId(creature), creature->GetGUID());
             return true;
         }
 
-        bool OnGossipSelect(Player* player, Creature* /*creature*/, uint32 /*menuId*/, uint32 gossipListId) override
+        // Every action below is server-side: the client only sends the index of
+        // an option the server put in its current menu, so the cloak and weapon
+        // indexes cannot be forged.
+        bool OnGossipSelect(Player* player, Creature* creature, uint32 sender, uint32 action) override
         {
-            switch (gossipListId)
+            if (sender != GOSSIP_SENDER_MAIN)
+                return true;
+
+            if (action == YESSKIPDK)
             {
-                case YESSKIPDK:
-                    Azerothcore_skip_deathknight_HandleSkip(player);
-                    CloseGossipMenuFor(player);
-                    break;
+                ShowCloakMenu(player, creature);
+                return true;
             }
+
+            if (action >= TofuSkipDK::ACTION_CLOAK_BASE && action < TofuSkipDK::ACTION_SKIP_BASE)
+            {
+                ShowWeaponMenu(player, creature, action - TofuSkipDK::ACTION_CLOAK_BASE);
+                return true;
+            }
+
+            if (action >= TofuSkipDK::ACTION_SKIP_BASE && action < TofuSkipDK::ACTION_SKIP_BASE + 100)
+            {
+                uint32 code = action - TofuSkipDK::ACTION_SKIP_BASE;
+                CloseGossipMenuFor(player);
+                Azerothcore_skip_deathknight_HandleSkip(player, code / 10, code % 10);
+                return true;
+            }
+
+            CloseGossipMenuFor(player);
             return true;
+        }
+
+private:
+        static void ShowCloakMenu(Player* player, Creature* creature)
+        {
+            ClearGossipMenuFor(player);
+            std::vector<uint32> cloaks = TofuSkipDK::ChoiceIndexes(TofuSkipDK::QUEST_CLOAK_CHOICE);
+            if (cloaks.empty())
+            {
+                // No choices in the database: go straight to the weapon menu.
+                ShowWeaponMenu(player, creature, 0);
+                return;
+            }
+
+            std::string links;
+            for (uint32 index : cloaks)
+            {
+                uint32 itemId = TofuSkipDK::ChoiceItem(TofuSkipDK::QUEST_CLOAK_CHOICE, index);
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Cloak: " + TofuSkipDK::ItemName(itemId), GOSSIP_SENDER_MAIN, TofuSkipDK::ACTION_CLOAK_BASE + index);
+                links += " " + TofuSkipDK::ItemLink(itemId);
+            }
+            ChatHandler(player->GetSession()).PSendSysMessage("Choose your cloak:{}", links);
+            SendGossipMenuFor(player, player->GetGossipTextId(creature), creature->GetGUID());
+        }
+
+        static void ShowWeaponMenu(Player* player, Creature* creature, uint32 cloakIndex)
+        {
+            ClearGossipMenuFor(player);
+            std::string city = player->GetTeamId() == TEAM_ALLIANCE ? "Stormwind" : "Orgrimmar";
+            uint32 cloakItem = TofuSkipDK::ChoiceItem(TofuSkipDK::QUEST_CLOAK_CHOICE, cloakIndex);
+            std::string cloakText = cloakItem ? TofuSkipDK::ItemName(cloakItem) + " and " : "";
+
+            std::vector<uint32> weapons = TofuSkipDK::ChoiceIndexes(TofuSkipDK::QUEST_WEAPON_CHOICE);
+            if (weapons.empty())
+                weapons.push_back(0);
+
+            std::string links;
+            for (uint32 index : weapons)
+            {
+                uint32 itemId = TofuSkipDK::ChoiceItem(TofuSkipDK::QUEST_WEAPON_CHOICE, index);
+                std::string name = itemId ? TofuSkipDK::ItemName(itemId) : "the default reward";
+                std::string popup = "Skip the starting zone with " + cloakText + name + "? Every starting quest is completed and you go to " + city + ".";
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Weapon: " + name, GOSSIP_SENDER_MAIN, TofuSkipDK::ACTION_SKIP_BASE + cloakIndex * 10 + index, popup, 0, false);
+                if (itemId)
+                    links += " " + TofuSkipDK::ItemLink(itemId);
+            }
+            if (!links.empty())
+                ChatHandler(player->GetSession()).PSendSysMessage("Choose your weapon:{}", links);
+            SendGossipMenuFor(player, player->GetGossipTextId(creature), creature->GetGUID());
         }
 };
 

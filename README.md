@@ -10,6 +10,13 @@
 
 - Skips the Death Knight starting zone, for those who want to make a Death Knight without having to go through the starting area.
 
+## Tofu Worldview changes (branch `tofu`)
+
+- The skip completes every obtainable quest of the Death Knight starting zone (57 quests, including the breadcrumbs, Abandoned Mail, The Power Of Blood, Frost And Unholy, Noth's Special Brew, and More Skulls For Brew), so they count as completed for the quest log history and quest-count achievements. Quests 12625 and 12626 are left out because no creature or object starts or ends them. A quest already in the log is turned in; a quest already turned in is skipped.
+- The Lich King's skip option opens a cloak menu (rewards of 12679) and then a two-hander menu (rewards of 12801); the choices are also posted in chat as item links. Only the picked items are given, instead of every choice. The weapon pick carries the confirmation box.
+- The first click keeps gossip action 1, so a module that watches that action (the Tofu challenge-modes fork) still blocks it.
+- The first-login automatic skip (`Skip.Deathknight.Starter.Enable`) has no menu and gives the first choice of each quest.
+
 ## How to use ingame
 
 1. Enable in conf
