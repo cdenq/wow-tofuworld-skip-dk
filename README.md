@@ -13,9 +13,12 @@
 ## Tofu Worldview changes (branch `tofu`)
 
 - The skip completes every obtainable quest of the Death Knight starting zone (57 quests, including the breadcrumbs, Abandoned Mail, The Power Of Blood, Frost And Unholy, Noth's Special Brew, and More Skulls For Brew), so they count as completed for the quest log history and quest-count achievements. Quests 12625 and 12626 are left out because no creature or object starts or ends them. A quest already in the log is turned in; a quest already turned in is skipped.
-- The Lich King's skip option opens a cloak menu (rewards of 12679) and then a two-hander menu (rewards of 12801); the choices are also posted in chat as item links. Only the picked items are given, instead of every choice. The weapon pick carries the confirmation box.
-- The first click keeps gossip action 1, so a module that watches that action (the Tofu challenge-modes fork) still blocks it.
-- The first-login automatic skip (`Skip.Deathknight.Starter.Enable`) has no menu and gives the first choice of each quest.
+- The Lich King offers "I wish to skip the starting zone." next to his quest, with no confirmation box. Clicking it completes the zone, sets the level and trained spells, and then opens the client's own quest reward window for Tonight We Dine In Havenshire (12679, the cloak) and then for The Light of Dawn (12801, the two-hander). A `ServerScript::CanPacketReceive` hook handles the reward pick from those windows, because the Lich King is not those quests' ender. Only the picked items are given.
+- After the weapon pick, the gold is reset, the weapon gets its rune, the hearthstone is set to Stormwind or Orgrimmar, and the player is teleported there 3 seconds later, so the client's item queries for the new rewards are answered before the loading screen (the core drops item queries while the player is between maps).
+- The final quest, Where Kings Walk (13188) or Warchief's Blessing (13189), is left in the log to turn in to King Varian Wrynn or Thrall. The skip option disappears once that quest is in the log or turned in.
+- Closing a reward window or logging out partway is safe: clicking the option again skips the quests already turned in and reopens the pending window.
+- The click keeps gossip action 1, so a module that watches that action (the Tofu challenge-modes fork) still blocks it.
+- The first-login automatic skip (`Skip.Deathknight.Starter.Enable`) has no windows and gives the first reward of each choice quest.
 
 ## How to use ingame
 
