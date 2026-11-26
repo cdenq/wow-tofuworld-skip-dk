@@ -59,9 +59,8 @@ constexpr auto YESSKIPDK = 1;
 // gossip menus on the Lich King, and nothing is given until the weapon pick is
 // confirmed, so a half-finished skip leaves no half-finished character. The
 // final quest (13188 or 13189) is turned in too, so its reputation with
-// Stormwind or Orgrimmar and its XP are applied. While the skip is available
-// the Lich King shows only his gossip text and the skip option, no quest
-// entries, so client addons that auto-click quests have nothing to click.
+// Stormwind or Orgrimmar and its XP are applied. The Lich King stays vanilla
+// (his gossip text and quest entries); the skip option is appended to it.
 namespace TofuSkipDK
 {
     constexpr uint32 NPC_LICH_KING = 25462;
@@ -371,15 +370,12 @@ public:
 
         bool OnGossipHello(Player* player, Creature* creature) override
         {
-            bool skipAvailable = sConfigMgr->GetOption<bool>("Skip.Deathknight.Optional.Enable", true) && !TofuSkipDK::IsSkipFinished(player);
-
-            // Tofu: no quest entries while the skip is available. Addons such
-            // as Jamba auto-click quest entries, and the skip completes those
-            // quests anyway.
-            if (!skipAvailable && creature->IsQuestGiver())
+            // Vanilla Lich King: his quest entries stay, and the skip option is
+            // appended after them.
+            if (creature->IsQuestGiver())
                 player->PrepareQuestMenu(creature->GetGUID());
 
-            if (skipAvailable)
+            if (sConfigMgr->GetOption<bool>("Skip.Deathknight.Optional.Enable", true) && !TofuSkipDK::IsSkipFinished(player))
             {
                 char const* localizedEntry;
                 switch (player->GetSession()->GetSessionDbcLocale())
