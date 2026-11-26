@@ -58,8 +58,10 @@ constexpr auto YESSKIPDK = 1;
 // player picks the cloak (quest 12679) and the two-hander (quest 12801) from
 // gossip menus on the Lich King, and nothing is given until the weapon pick is
 // confirmed, so a half-finished skip leaves no half-finished character. The
-// final quest (13188 or 13189) is left in the log to turn in to King Varian
-// Wrynn or Thrall.
+// final quest (13188 or 13189) is turned in too, so its reputation with
+// Stormwind or Orgrimmar and its XP are applied. While the skip is available
+// the Lich King shows only his gossip text and the skip option, no quest
+// entries, so client addons that auto-click quests have nothing to click.
 namespace TofuSkipDK
 {
     constexpr uint32 NPC_LICH_KING = 25462;
@@ -99,7 +101,8 @@ namespace TofuSkipDK
         return player->GetTeamId() == TEAM_ALLIANCE ? QUEST_FINAL_ALLIANCE : QUEST_FINAL_HORDE;
     }
 
-    // The skip is finished once the final quest is in the log or turned in.
+    // The skip is finished once the final quest is turned in (or, for a
+    // character from an older build, still in the log).
     bool IsSkipFinished(Player* player)
     {
         return player->GetQuestStatus(FinalQuest(player)) != QUEST_STATUS_NONE || player->IsQuestRewarded(FinalQuest(player));
@@ -131,6 +134,8 @@ namespace TofuSkipDK
         else
             LOG_ERROR("module", "Skip DK: no A Special Surprise quest for player {} (race {})", player->GetName(), player->getRace());
         quests.insert(quests.end(), std::begin(FINAL_QUESTS), std::end(FINAL_QUESTS));
+        // Last, so the level is set after the XP of every turn-in.
+        quests.push_back(FinalQuest(player));
         return quests;
     }
 
@@ -245,8 +250,8 @@ namespace TofuSkipDK
         player->SaveToDB(false, false);
     }
 
-    // Gold, weapon enchantment, homebind, the final quest, and the teleport to
-    // the faction capital. The teleport waits a few seconds so the client's item
+    // Gold, weapon enchantment, homebind, and the teleport to the faction
+    // capital. The teleport waits a few seconds so the client's item
     // queries for the new rewards are answered before the loading screen; the
     // server drops item queries while the player is between maps.
     void FinishSkip(Player* player)
@@ -278,21 +283,10 @@ namespace TofuSkipDK
         else
             player->SetHomebind(WorldLocation(1, 1637.62f, -4440.22f, 15.78f, 2.42f), 1637); // Orgrimmar
 
-        // The final quest stays in the log for the faction leader to turn in.
-        uint32 finalQuestId = FinalQuest(player);
-        if (Quest const* finalQuest = sObjectMgr->GetQuestTemplate(finalQuestId))
-        {
-            if (!player->IsQuestRewarded(finalQuestId) && player->GetQuestStatus(finalQuestId) == QUEST_STATUS_NONE)
-                player->AddQuest(finalQuest, nullptr);
-        }
-        else
-            LOG_ERROR("module", "Skip DK: quest {} does not exist, not giving it to player {}", finalQuestId, player->GetName());
-
         player->SaveToDB(false, false);
 
         std::string city = alliance ? "Stormwind" : "Orgrimmar";
-        std::string leader = alliance ? "King Varian Wrynn" : "Thrall";
-        ChatHandler(player->GetSession()).PSendSysMessage("Sending you to {} in {} seconds. Turn in your last quest to {}.", city, TELEPORT_DELAY_MS / 1000, leader);
+        ChatHandler(player->GetSession()).PSendSysMessage("Sending you to {} in {} seconds.", city, TELEPORT_DELAY_MS / 1000);
         LOG_INFO("module", "Skip DK: {} finished the skip, teleport to {} in {} ms", player->GetName(), city, TELEPORT_DELAY_MS);
 
         // The event belongs to the player, so it is dropped if the player logs
@@ -360,7 +354,7 @@ public:
     }
 };
 
-#define LOCALE_LICHKING_0 "I wish to skip the starting zone."
+#define LOCALE_LICHKING_0 "Skip DK zone"
 #define LOCALE_LICHKING_1 "죽음의 기사 스타터 퀘스트 라인을 건너뛰고 싶습니다."
 #define LOCALE_LICHKING_2 "Je souhaite sauter la série de quêtes de démarrage du Chevalier de la mort."
 #define LOCALE_LICHKING_3 "Ich möchte die Todesritter-Starter-Questreihe überspringen."
@@ -377,10 +371,15 @@ public:
 
         bool OnGossipHello(Player* player, Creature* creature) override
         {
-            if (creature->IsQuestGiver())
+            bool skipAvailable = sConfigMgr->GetOption<bool>("Skip.Deathknight.Optional.Enable", true) && !TofuSkipDK::IsSkipFinished(player);
+
+            // Tofu: no quest entries while the skip is available. Addons such
+            // as Jamba auto-click quest entries, and the skip completes those
+            // quests anyway.
+            if (!skipAvailable && creature->IsQuestGiver())
                 player->PrepareQuestMenu(creature->GetGUID());
 
-            if (sConfigMgr->GetOption<bool>("Skip.Deathknight.Optional.Enable", true) && !TofuSkipDK::IsSkipFinished(player))
+            if (skipAvailable)
             {
                 char const* localizedEntry;
                 switch (player->GetSession()->GetSessionDbcLocale())
@@ -398,7 +397,7 @@ public:
                 }
                 // Tofu: no confirmation here; the cloak and weapon menus follow,
                 // and the weapon pick carries the confirmation.
-                AddGossipItemFor(player, GOSSIP_ICON_INTERACT_1, localizedEntry, GOSSIP_SENDER_MAIN, YESSKIPDK);
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, localizedEntry, GOSSIP_SENDER_MAIN, YESSKIPDK);
             }
             player->TalkedToCreature(creature->GetEntry(), creature->GetGUID());
             SendGossipMenuFor(player, player->GetGossipTextId(creature), creature->GetGUID());
