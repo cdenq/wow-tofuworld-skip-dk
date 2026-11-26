@@ -44,6 +44,7 @@
 #include "ScriptedCreature.h"
 #include "ScriptedGossip.h"
 #include "SharedDefines.h"
+#include "StringFormat.h"
 #include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
@@ -54,10 +55,11 @@
 constexpr auto YESSKIPDK = 1;
 
 // Tofu Worldview: the skip completes every obtainable Ebon Hold quest. The
-// cloak quest (12679) and the weapon quest (12801) are turned in through the
-// client's own quest reward window, opened from the Lich King, so the player
-// picks the reward there. The final quest (13188 or 13189) is left in the log
-// to turn in to King Varian Wrynn or Thrall.
+// player picks the cloak (quest 12679) and the two-hander (quest 12801) from
+// gossip menus on the Lich King, and nothing is given until the weapon pick is
+// confirmed, so a half-finished skip leaves no half-finished character. The
+// final quest (13188 or 13189) is left in the log to turn in to King Varian
+// Wrynn or Thrall.
 namespace TofuSkipDK
 {
     constexpr uint32 NPC_LICH_KING = 25462;
@@ -67,6 +69,12 @@ namespace TofuSkipDK
     constexpr uint32 QUEST_FINAL_ALLIANCE = 13188; // Where Kings Walk (King Varian Wrynn)
     constexpr uint32 QUEST_FINAL_HORDE = 13189;    // Warchief's Blessing (Thrall)
     constexpr uint32 TELEPORT_DELAY_MS = 3000;
+
+    // Gossip actions above the module's YESSKIPDK (1). The first click stays
+    // action 1 so modules that watch it (the Tofu challenge-modes fork, which
+    // blocks actions 1 and 1100 to 1299) still see it.
+    constexpr uint32 ACTION_CLOAK_BASE = GOSSIP_ACTION_INFO_DEF + 100; // + cloak index
+    constexpr uint32 ACTION_SKIP_BASE = GOSSIP_ACTION_INFO_DEF + 200;  // + cloak index * 10 + weapon index
 
     // Every obtainable quest of the Death Knight starting zone, in chain order,
     // the cloak and weapon quests included. The race quest "A Special Surprise"
@@ -85,14 +93,6 @@ namespace TofuSkipDK
         12751, 12754, 12755, 12756, 12757, 12778, 12779, 12800, 12801, 13165,
         13166
     };
-
-    // The two quests whose reward the player picks, in the order they are offered.
-    constexpr uint32 CHOICE_QUESTS[] = { QUEST_CLOAK_CHOICE, QUEST_WEAPON_CHOICE };
-
-    bool IsChoiceQuest(uint32 questId)
-    {
-        return questId == QUEST_CLOAK_CHOICE || questId == QUEST_WEAPON_CHOICE;
-    }
 
     uint32 FinalQuest(Player* player)
     {
@@ -134,30 +134,61 @@ namespace TofuSkipDK
         return quests;
     }
 
-    // Puts a quest in the log as ready to turn in. Returns false if the quest
-    // log is full.
-    bool MakeReadyToTurnIn(Player* player, Quest const* quest)
+    // Returns the choice index to use: the requested one if that slot holds an
+    // item, otherwise 0 (the first choice).
+    uint32 ValidChoice(Quest const* quest, uint32 choice)
     {
-        uint32 questId = quest->GetQuestId();
-        if (player->GetQuestStatus(questId) == QUEST_STATUS_NONE)
-            player->AddQuest(quest, nullptr);
-        if (player->GetQuestStatus(questId) == QUEST_STATUS_NONE)
-            return false;
-        if (player->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
-            player->CompleteQuest(questId);
-        return true;
+        if (choice < QUEST_REWARD_CHOICES_COUNT && quest->RewardChoiceItemId[choice])
+            return choice;
+        return 0;
     }
 
-    // Turns in every starting quest except the two choice quests, which are
-    // put in the log as ready to turn in (or, when autoChoose is set, turned in
-    // with their first reward). Also gives the Hearthstone, the level, and the
-    // trained spells. Returns false if the quest log is full.
-    bool CompleteQuests(Player* player, bool autoChoose)
+    // Choice indexes of a quest that hold an item.
+    std::vector<uint32> ChoiceIndexes(uint32 questId)
+    {
+        std::vector<uint32> indexes;
+        if (Quest const* quest = sObjectMgr->GetQuestTemplate(questId))
+            for (uint32 i = 0; i < QUEST_REWARD_CHOICES_COUNT; ++i)
+                if (quest->RewardChoiceItemId[i])
+                    indexes.push_back(i);
+        return indexes;
+    }
+
+    uint32 ChoiceItem(uint32 questId, uint32 index)
+    {
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        if (!quest || index >= QUEST_REWARD_CHOICES_COUNT)
+            return 0;
+        return quest->RewardChoiceItemId[index];
+    }
+
+    std::string ItemName(uint32 itemId)
+    {
+        if (ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId))
+            return proto->Name1;
+        return "item " + std::to_string(itemId);
+    }
+
+    // Chat link the player can hover to see the item's tooltip.
+    std::string ItemLink(uint32 itemId)
+    {
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
+        if (!proto)
+            return ItemName(itemId);
+        uint32 quality = proto->Quality < MAX_ITEM_QUALITY ? proto->Quality : 0;
+        return Acore::StringFormat("|c{:08x}|Hitem:{}:0:0:0:0:0:0:0:0|h[{}]|h|r", ItemQualityColors[quality], itemId, proto->Name1);
+    }
+
+    // Turns in every starting quest, the cloak and weapon quests with the given
+    // choices. A quest in the log is turned in as it is; a quest turned in
+    // before is skipped. Also gives the Hearthstone, the level, and the trained
+    // spells.
+    void CompleteQuests(Player* player, uint32 cloakChoice, uint32 weaponChoice)
     {
         if (!player->HasItemCount(ITEM_HEARTHSTONE, 1, true))
             player->AddItem(ITEM_HEARTHSTONE, 1);
 
-        bool logFull = false;
+        uint32 turnedIn = 0;
         for (uint32 questId : AllQuests(player))
         {
             // A quest can be missing from the world database.
@@ -171,20 +202,25 @@ namespace TofuSkipDK
             if (player->IsQuestRewarded(questId))
                 continue;
 
-            if (IsChoiceQuest(questId) && !autoChoose)
-            {
-                if (!MakeReadyToTurnIn(player, quest))
-                    logFull = true;
-                continue;
-            }
+            uint32 choice = 0;
+            if (questId == QUEST_CLOAK_CHOICE)
+                choice = ValidChoice(quest, cloakChoice);
+            else if (questId == QUEST_WEAPON_CHOICE)
+                choice = ValidChoice(quest, weaponChoice);
 
             // A quest already in the log is turned in as it is; any other quest
             // is taken first. Either way it counts as completed (quest log
             // history, quest-count achievements).
             if (player->GetQuestStatus(questId) == QUEST_STATUS_NONE)
                 player->AddQuest(quest, nullptr);
-            player->RewardQuest(quest, 0, player, false);
+            player->RewardQuest(quest, choice, player, false);
+            ++turnedIn;
+
+            if (!player->IsQuestRewarded(questId))
+                LOG_ERROR("module", "Skip DK: quest {} is not rewarded after RewardQuest for player {}", questId, player->GetName());
         }
+
+        LOG_INFO("module", "Skip DK: {} turned in {} quests (cloak choice {}, weapon choice {})", player->GetName(), turnedIn, cloakChoice, weaponChoice);
 
         int DKL = sConfigMgr->GetOption<float>("Skip.Deathknight.Start.Level", 58);
         if (player->GetLevel() <= DKL)
@@ -207,7 +243,6 @@ namespace TofuSkipDK
         }
 
         player->SaveToDB(false, false);
-        return !logFull;
     }
 
     // Gold, weapon enchantment, homebind, the final quest, and the teleport to
@@ -258,52 +293,36 @@ namespace TofuSkipDK
         std::string city = alliance ? "Stormwind" : "Orgrimmar";
         std::string leader = alliance ? "King Varian Wrynn" : "Thrall";
         ChatHandler(player->GetSession()).PSendSysMessage("Sending you to {} in {} seconds. Turn in your last quest to {}.", city, TELEPORT_DELAY_MS / 1000, leader);
+        LOG_INFO("module", "Skip DK: {} finished the skip, teleport to {} in {} ms", player->GetName(), city, TELEPORT_DELAY_MS);
 
         // The event belongs to the player, so it is dropped if the player logs
         // out first; the homebind is already set.
         player->m_Events.AddEventAtOffset([player, alliance]
         {
             if (!player->IsInWorld() || player->IsBeingTeleported())
-                return;
-            if (alliance)
-                player->TeleportTo(0, -8833.37f, 628.62f, 94.00f, 1.06f); // Stormwind
-            else
-                player->TeleportTo(1, 1569.59f, -4397.63f, 7.70f, 0.54f); // Orgrimmar
-        }, Milliseconds(TELEPORT_DELAY_MS));
-    }
-
-    // Opens the quest reward window for the next choice quest that is not yet
-    // turned in, or finishes the skip when both are done.
-    void ContinueSkip(Player* player, Creature* lichKing)
-    {
-        for (uint32 questId : CHOICE_QUESTS)
-        {
-            if (player->IsQuestRewarded(questId))
-                continue;
-
-            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
-            if (!quest)
-                continue;
-
-            if (!MakeReadyToTurnIn(player, quest))
             {
-                ChatHandler(player->GetSession()).SendSysMessage("Your quest log is full. Abandon a quest and talk to the Lich King again.");
+                LOG_INFO("module", "Skip DK: teleport of {} skipped (in world {}, being teleported {})", player->GetName(), player->IsInWorld(), player->IsBeingTeleported());
                 return;
             }
 
-            player->PlayerTalkClass->SendQuestGiverOfferReward(quest, lichKing->GetGUID(), true);
-            return;
-        }
+            bool ok = alliance ? player->TeleportTo(0, -8833.37f, 628.62f, 94.00f, 1.06f)  // Stormwind
+                               : player->TeleportTo(1, 1569.59f, -4397.63f, 7.70f, 0.54f); // Orgrimmar
+            if (!ok)
+                LOG_ERROR("module", "Skip DK: TeleportTo failed for {}", player->GetName());
+        }, Milliseconds(TELEPORT_DELAY_MS));
+    }
 
+    void RunSkip(Player* player, uint32 cloakChoice, uint32 weaponChoice)
+    {
+        CompleteQuests(player, cloakChoice, weaponChoice);
         FinishSkip(player);
     }
 }
 
-// First-login automatic skip: no windows, first reward of each choice quest.
+// First-login automatic skip: first reward of each choice quest.
 void Azerothcore_skip_deathknight_HandleSkip(Player* player)
 {
-    TofuSkipDK::CompleteQuests(player, true);
-    TofuSkipDK::FinishSkip(player);
+    TofuSkipDK::RunSkip(player, 0, 0);
 }
 
 class AzerothCore_skip_deathknight_announce : public PlayerScript
@@ -377,7 +396,8 @@ public:
                 case LOCALE_enUS: localizedEntry = LOCALE_LICHKING_0; break;
                 default: localizedEntry = LOCALE_LICHKING_0;
                 }
-                // Tofu: no confirmation box; the reward windows follow.
+                // Tofu: no confirmation here; the cloak and weapon menus follow,
+                // and the weapon pick carries the confirmation.
                 AddGossipItemFor(player, GOSSIP_ICON_INTERACT_1, localizedEntry, GOSSIP_SENDER_MAIN, YESSKIPDK);
             }
             player->TalkedToCreature(creature->GetEntry(), creature->GetGUID());
@@ -385,85 +405,101 @@ public:
             return true;
         }
 
+        // Every action below is server-side: the client only sends the index of
+        // an option the server put in its current menu, so the cloak and weapon
+        // indexes cannot be forged.
         bool OnGossipSelect(Player* player, Creature* creature, uint32 sender, uint32 action) override
         {
-            CloseGossipMenuFor(player);
-
-            if (sender != GOSSIP_SENDER_MAIN || action != YESSKIPDK)
+            if (sender != GOSSIP_SENDER_MAIN)
                 return true;
 
             if (!sConfigMgr->GetOption<bool>("Skip.Deathknight.Optional.Enable", true) || TofuSkipDK::IsSkipFinished(player))
-                return true;
-
-            // Clicking again after closing a reward window resumes: turned-in
-            // quests are skipped and the pending window opens again.
-            if (!TofuSkipDK::CompleteQuests(player, false))
             {
-                ChatHandler(player->GetSession()).SendSysMessage("Your quest log is full. Abandon a quest and talk to the Lich King again.");
+                CloseGossipMenuFor(player);
                 return true;
             }
-            TofuSkipDK::ContinueSkip(player, creature);
+
+            if (action == YESSKIPDK)
+            {
+                LOG_INFO("module", "Skip DK: {} chose to skip the starting zone", player->GetName());
+                ShowCloakMenu(player, creature);
+                return true;
+            }
+
+            if (action >= TofuSkipDK::ACTION_CLOAK_BASE && action < TofuSkipDK::ACTION_SKIP_BASE)
+            {
+                ShowWeaponMenu(player, creature, action - TofuSkipDK::ACTION_CLOAK_BASE);
+                return true;
+            }
+
+            if (action >= TofuSkipDK::ACTION_SKIP_BASE && action < TofuSkipDK::ACTION_SKIP_BASE + 100)
+            {
+                uint32 code = action - TofuSkipDK::ACTION_SKIP_BASE;
+                CloseGossipMenuFor(player);
+                TofuSkipDK::RunSkip(player, code / 10, code % 10);
+                return true;
+            }
+
+            CloseGossipMenuFor(player);
             return true;
         }
-};
 
-// The reward windows are opened from the Lich King, who is not the quest ender
-// of 12679 or 12801, so the core's CMSG_QUESTGIVER_CHOOSE_REWARD handler would
-// ignore the player's pick. This hook handles that pick instead and drops the
-// packet. Any other reward pick goes to the core as usual. The hook runs in the
-// world update, where the core's own handler runs.
-class Azerothcore_skip_deathknight_reward_choice : public ServerScript
-{
-public:
-    Azerothcore_skip_deathknight_reward_choice() : ServerScript("Azerothcore_skip_deathknight_reward_choice", {
-        SERVERHOOK_CAN_PACKET_RECEIVE
-    }) { }
-
-    bool CanPacketReceive(WorldSession* session, WorldPacket const& packet) override
-    {
-        if (packet.GetOpcode() != CMSG_QUESTGIVER_CHOOSE_REWARD)
-            return true;
-
-        Player* player = session ? session->GetPlayer() : nullptr;
-        if (!player || !player->IsInWorld())
-            return true;
-
-        ObjectGuid guid;
-        uint32 questId = 0;
-        uint32 reward = 0;
-        try
+private:
+        // The cloak menu. With nothing to choose (no choice items, or the cloak
+        // quest was turned in earlier by an older build) it goes straight to the
+        // weapon menu.
+        static void ShowCloakMenu(Player* player, Creature* creature)
         {
-            WorldPacket data(packet);
-            data >> guid >> questId >> reward;
+            ClearGossipMenuFor(player);
+            std::vector<uint32> cloaks = TofuSkipDK::ChoiceIndexes(TofuSkipDK::QUEST_CLOAK_CHOICE);
+            if (cloaks.empty() || player->IsQuestRewarded(TofuSkipDK::QUEST_CLOAK_CHOICE))
+            {
+                // Nothing to choose: go straight to the weapon menu.
+                ShowWeaponMenu(player, creature, 0);
+                return;
+            }
+
+            std::string links;
+            for (uint32 index : cloaks)
+            {
+                uint32 itemId = TofuSkipDK::ChoiceItem(TofuSkipDK::QUEST_CLOAK_CHOICE, index);
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Cloak: " + TofuSkipDK::ItemName(itemId), GOSSIP_SENDER_MAIN, TofuSkipDK::ACTION_CLOAK_BASE + index);
+                links += " " + TofuSkipDK::ItemLink(itemId);
+            }
+            ChatHandler(player->GetSession()).PSendSysMessage("Choose your cloak:{}", links);
+            SendGossipMenuFor(player, player->GetGossipTextId(creature), creature->GetGUID());
         }
-        catch (ByteBufferException const&)
+
+        static void ShowWeaponMenu(Player* player, Creature* creature, uint32 cloakIndex)
         {
-            return true; // let the core report the malformed packet
+            ClearGossipMenuFor(player);
+            std::string city = player->GetTeamId() == TEAM_ALLIANCE ? "Stormwind" : "Orgrimmar";
+            uint32 cloakItem = TofuSkipDK::ChoiceItem(TofuSkipDK::QUEST_CLOAK_CHOICE, cloakIndex);
+            std::string cloakText = (cloakItem && !player->IsQuestRewarded(TofuSkipDK::QUEST_CLOAK_CHOICE)) ? TofuSkipDK::ItemName(cloakItem) + " and " : "";
+
+            std::vector<uint32> weapons = TofuSkipDK::ChoiceIndexes(TofuSkipDK::QUEST_WEAPON_CHOICE);
+            if (weapons.empty() || player->IsQuestRewarded(TofuSkipDK::QUEST_WEAPON_CHOICE))
+            {
+                // Nothing to choose (no choice items, or the weapon quest was
+                // turned in earlier): one confirmation, then the skip.
+                weapons.clear();
+                weapons.push_back(0);
+            }
+
+            std::string links;
+            for (uint32 index : weapons)
+            {
+                uint32 itemId = TofuSkipDK::ChoiceItem(TofuSkipDK::QUEST_WEAPON_CHOICE, index);
+                std::string name = itemId ? TofuSkipDK::ItemName(itemId) : "the default reward";
+                std::string popup = "Skip the starting zone with " + cloakText + name + "? Every starting quest is completed and you go to " + city + ".";
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Weapon: " + name, GOSSIP_SENDER_MAIN, TofuSkipDK::ACTION_SKIP_BASE + cloakIndex * 10 + index, popup, 0, false);
+                if (itemId)
+                    links += " " + TofuSkipDK::ItemLink(itemId);
+            }
+            if (!links.empty())
+                ChatHandler(player->GetSession()).PSendSysMessage("Choose your weapon:{}", links);
+            SendGossipMenuFor(player, player->GetGossipTextId(creature), creature->GetGUID());
         }
-
-        if (!TofuSkipDK::IsChoiceQuest(questId) || !guid.IsCreature())
-            return true;
-
-        Creature* lichKing = ObjectAccessor::GetCreature(*player, guid);
-        if (!lichKing || lichKing->GetEntry() != TofuSkipDK::NPC_LICH_KING)
-            return true;
-
-        // From here on the pick belongs to the skip; the core would ignore it.
-        if (reward >= QUEST_REWARD_CHOICES_COUNT || !player->CanInteractWithQuestGiver(lichKing))
-            return false;
-
-        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
-        if (!quest || player->IsQuestRewarded(questId) || player->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
-            return false;
-
-        // Checks bag space and reports a full inventory to the player.
-        if (!player->CanRewardQuest(quest, reward, true))
-            return false;
-
-        player->RewardQuest(quest, reward, lichKing);
-        TofuSkipDK::ContinueSkip(player, lichKing);
-        return false;
-    }
 };
 
 void AddSkipDKScripts()
@@ -471,5 +507,4 @@ void AddSkipDKScripts()
     new AzerothCore_skip_deathknight_announce;
     new AzerothCore_skip_deathknight;
     new Azerothcore_optional_deathknight_skip;
-    new Azerothcore_skip_deathknight_reward_choice;
 }
